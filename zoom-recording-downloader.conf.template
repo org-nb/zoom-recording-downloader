@@ -9,7 +9,8 @@
         "_comment": "Set 'storage_type' to 'local' for local storage or 'googledrive' for Google Drive (case-insensitive)",
         "storage_type": "local",
         "completed_log": "completed-downloads.log",
-        "download_dir": "downloads"
+        "download_dir": "downloads",
+        "skip_existing_files": false
     },
     "GoogleDrive": {
         "_comment": "Optional: Only needed if using Google Drive upload feature",

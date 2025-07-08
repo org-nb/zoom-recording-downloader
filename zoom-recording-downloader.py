@@ -82,7 +82,9 @@ RECORDING_END_DATE = parser.parse(config("Recordings", "end_date", str(date.toda
 DOWNLOAD_DIRECTORY = config("Storage", "download_dir", 'downloads')
 AUTO_STORAGE_CHOICE = config("Storage", "storage_type", '')
 COMPLETED_MEETING_IDS_LOG = config("Storage", "completed_log", 'completed-downloads.log')
+COMPLETED_MEETING_IDS_LOGFILEPATH = os.sep.join([DOWNLOAD_DIRECTORY, COMPLETED_MEETING_IDS_LOG])
 COMPLETED_MEETING_IDS = set()
+SKIP_EXISTING_FILES = config("Storage", "skip_existing_files", False)
 
 MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
 MEETING_STRFTIME = config("Recordings", "strftime", '%Y.%m.%d - %I.%M %p UTC')
@@ -253,7 +255,7 @@ def per_delta(start, end, delta):
         curr += delta
 
 
-def list_recordings(email):
+def list_recordings(user_id, email = None):
     """ Start date now split into YEAR, MONTH, and DAY variables (Within 6 month range)
         then get recordings within that range
     """
@@ -261,9 +263,9 @@ def list_recordings(email):
     recordings = []
 
     for start, end in per_delta(RECORDING_START_DATE, RECORDING_END_DATE, timedelta(days=30)):
-        post_data = get_recordings(email, 300, start, end)
+        post_data = get_recordings(user_id, 300, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         response = requests.get(
-            url=f"https://api.zoom.us/v2/users/{email}/recordings",
+            url=f"https://api.zoom.us/v2/users/{user_id}/recordings",
             headers=AUTHORIZATION_HEADER,
             params=post_data
         )
@@ -271,7 +273,7 @@ def list_recordings(email):
         if "meetings" in recordings_data:
             recordings.extend(recordings_data["meetings"])
         else:
-            print(f"No 'meetings' key found in response for {email} from {start} to {end}")
+            print(f"No 'meetings' key found in response for {user_id} from {start} to {end}")
 
     return recordings
 
@@ -312,13 +314,16 @@ def download_recording(download_url, email, filename, folder_name):
 
 def load_completed_meeting_ids():
     try:
-        with open(COMPLETED_MEETING_IDS_LOG, 'r') as fd:
-            [COMPLETED_MEETING_IDS.add(line.strip()) for line in fd]
+        with open(COMPLETED_MEETING_IDS_LOGFILEPATH, 'r', encoding="utf-8") as fd:
+            for line in fd:
+                parts = line.strip().split()
+                # Add only the UUID part
+                COMPLETED_MEETING_IDS.add(parts[0])
 
     except FileNotFoundError:
         print(
             f"{Color.DARK_CYAN}Log file not found. Creating new log file: {Color.END}"
-            f"{COMPLETED_MEETING_IDS_LOG}\n"
+            f"{COMPLETED_MEETING_IDS_LOGFILEPATH}\n"
         )
 
 
@@ -401,15 +406,15 @@ def main():
         )
         print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
 
-        recordings = list_recordings(user_id)
+        recordings = list_recordings(user_id, email)
         total_count = len(recordings)
         print(f"==> Found {total_count} recordings")
 
         for index, recording in enumerate(recordings):
             try:
-                recording_id = recording["uuid"]
+                recording_uuid = recording["uuid"]
 
-                if recording_id in COMPLETED_MEETING_IDS:
+                if recording_uuid in COMPLETED_MEETING_IDS:
                     print(
                         f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
                     )
@@ -443,6 +448,10 @@ def main():
                     sanitized_filename = path_validate.sanitize_filename(filename)
                     full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
 
+                    if SKIP_EXISTING_FILES and os.path.exists(full_filename):
+                        print(f"    > File already exists: {full_filename}")
+                        continue
+                    
                     if download_recording(download_url, email, filename, folder_name):
                         if GDRIVE_ENABLED and drive_service:
                             print(f"    > Uploading to Google Drive...")
@@ -460,9 +469,10 @@ def main():
                     )
                     continue
 
-            with open(COMPLETED_MEETING_IDS_LOG, "a") as fd:
-                fd.write(f"{recording_id}\n")
-                COMPLETED_MEETING_IDS.add(recording_id)
+            with open(COMPLETED_MEETING_IDS_LOGFILEPATH, "a", encoding="utf-8") as fd:
+                # Write the completed recording UUID to the log file with additional human-friendly info
+                fd.write(f"{recording_uuid} Start:{recording['uuid']} TZ:{recording['timezone']} Topic:'{recording['topic']}'\n")
+                COMPLETED_MEETING_IDS.add(recording_uuid)
 
 
 if __name__ == "__main__":
