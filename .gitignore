@@ -16,8 +16,9 @@ __pycache__/*
 # Ignore Visual Studio Code Workspace
 *.code-workspace
 
-# Ignore conf file
+# Ignore conf files
 zoom-recording-downloader.conf
+zoom-recording-downloader.*.conf
 
 # Ignore vscode settings
 .vscode
