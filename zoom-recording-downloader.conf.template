@@ -31,5 +31,9 @@
         "strftime": "%Y.%m.%d-%H.%M%z",
         "filename": "{meeting_time}-{topic}-{rec_type}-{recording_id}.{file_extension}",
         "folder": "{year}/{month}/{meeting_time}-{topic}"
+    },
+    "Debug": {
+        "enabled": false,
+        "dump_dir": "debugdumps"
     }
 }

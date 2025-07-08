@@ -99,6 +99,10 @@ GDRIVE_RETRY_DELAY = int(config("GoogleDrive", "retry_delay", "5"))
 GDRIVE_MAX_RETRIES = int(config("GoogleDrive", "max_retries", "3"))
 GDRIVE_FAILED_LOG = config("GoogleDrive", "failed_log", "failed-uploads.log")
 
+# Debugging
+DEBUG_ENABLED = config("Debug", "enabled", False)
+DEBUG_DUMP_DIR = config("Debug", "dump_dir", 'debugdumps')
+
 def setup_google_drive():
     """Initialize Google Drive client with OAuth authentication"""
     try:
@@ -269,6 +273,12 @@ def list_recordings(user_id, email = None):
             headers=AUTHORIZATION_HEADER,
             params=post_data
         )
+
+        if DEBUG_ENABLED:
+            debug_filename = os.sep.join([DEBUG_DUMP_DIR, f"api_user_{email if email else user_id}_recordings_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}.json"])
+            with open(debug_filename, 'w', encoding='utf-8') as debug_file:
+                debug_file.write(response.text) 
+
         recordings_data = response.json()
         if "meetings" in recordings_data:
             recordings.extend(recordings_data["meetings"])
@@ -332,12 +342,19 @@ def handle_graceful_shutdown(signal_received, frame):
 
     system.exit(0)
 
+def init_debug():
+    if not DEBUG_ENABLED:
+        return
+
+    os.makedirs(DEBUG_DUMP_DIR, exist_ok=True)
 
 # ################################################################
 # #                        MAIN                                  #
 # ################################################################
 
 def main():
+    init_debug()
+
     # clear the screen buffer
     os.system('cls' if os.name == 'nt' else 'clear')
 
