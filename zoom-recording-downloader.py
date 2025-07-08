@@ -70,7 +70,7 @@ ACCOUNT_ID = config("OAuth", "account_id", LookupError)
 CLIENT_ID = config("OAuth", "client_id", LookupError)
 CLIENT_SECRET = config("OAuth", "client_secret", LookupError)
 
-APP_VERSION = "3.1 (Google Drive Edition)"
+APP_VERSION = "3.2 (Google Drive Edition)"
 
 API_ENDPOINT_USER_LIST = "https://api.zoom.us/v2/users"
 
@@ -80,6 +80,7 @@ RECORDING_START_DAY = config("Recordings", "start_day", 1)
 RECORDING_START_DATE = parser.parse(config("Recordings", "start_date", f"{RECORDING_START_YEAR}-{RECORDING_START_MONTH}-{RECORDING_START_DAY}")).replace(tzinfo=timezone.utc)
 RECORDING_END_DATE = parser.parse(config("Recordings", "end_date", str(date.today()))).replace(tzinfo=timezone.utc)
 DOWNLOAD_DIRECTORY = config("Storage", "download_dir", 'downloads')
+AUTO_STORAGE_CHOICE = config("Storage", "storage_type", '')
 COMPLETED_MEETING_IDS_LOG = config("Storage", "completed_log", 'completed-downloads.log')
 COMPLETED_MEETING_IDS = set()
 
@@ -362,14 +363,25 @@ def main():
         {Color.END}
     """)
 
-    # Storage choice prompt
-    print("\nChoose download method:")
-    print("1. Local Storage")
-    print("2. Google Drive")
-    choice = input("Enter choice (1-2): ")
-
     global GDRIVE_ENABLED
-    GDRIVE_ENABLED = (choice == "2")
+    GDRIVE_ENABLED = False
+
+    if AUTO_STORAGE_CHOICE:
+        if AUTO_STORAGE_CHOICE.lower() == 'local':
+            pass
+        elif AUTO_STORAGE_CHOICE.lower() == 'googledrive':
+            GDRIVE_ENABLED = True
+        else:
+            print(f"{Color.RED}### Configuration 'storage_type' must be 'local' or 'googledrive' (case-insensitive) or blank to prompt. Unknown value: {AUTO_STORAGE_CHOICE}{Color.END}")
+            system.exit(1)
+        print(f"\nUsing storage type: '{AUTO_STORAGE_CHOICE}\n")
+    else:
+        # Storage choice prompt
+        print("\nChoose download method:")
+        print("1. Local Storage")
+        print("2. Google Drive")
+        choice = input("Enter choice (1-2): ")
+        GDRIVE_ENABLED = (choice == "2")
 
     drive_service = None
     if GDRIVE_ENABLED:
