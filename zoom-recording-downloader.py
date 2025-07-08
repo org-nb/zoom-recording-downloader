@@ -488,7 +488,7 @@ def main():
 
             with open(COMPLETED_MEETING_IDS_LOGFILEPATH, "a", encoding="utf-8") as fd:
                 # Write the completed recording UUID to the log file with additional human-friendly info
-                fd.write(f"{recording_uuid} Start:{recording['uuid']} TZ:{recording['timezone']} Topic:'{recording['topic']}'\n")
+                fd.write(f"{recording_uuid} Start:{recording['start_time']} TZ:{recording['timezone']} Topic:'{recording['topic']}'\n")
                 COMPLETED_MEETING_IDS.add(recording_uuid)
 
 
