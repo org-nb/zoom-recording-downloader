@@ -182,6 +182,16 @@ def load_access_token():
         print(f"{Color.RED}### The key 'access_token' wasn't found.{Color.END}")
 
 
+def maybe_refresh_token(token_refresh_start_time):
+    # Check if an hour has elapsed and refresh token if needed
+    elapsed_time = time.time() - token_refresh_start_time
+    if elapsed_time >= 3600:  # 3600 seconds = 1 hour
+        # refresh the access token so it does not expire for long running downloads
+        load_access_token()
+        token_refresh_start_time = time.time()  # Reset the timer
+    return token_refresh_start_time
+
+
 def get_users():
     """ loop through pages and return all users """
     response = requests.get(url=API_ENDPOINT_USER_LIST, headers=AUTHORIZATION_HEADER)
@@ -516,12 +526,7 @@ def main():
         token_refresh_start_time = time.time()
 
         for index, recording in enumerate(recordings):
-            # Check if an hour has elapsed and refresh token if needed
-            elapsed_time = time.time() - token_refresh_start_time
-            if elapsed_time >= 3600:  # 3600 seconds = 1 hour
-                # refresh the access token so it does not expire for long running downloads
-                load_access_token()
-                token_refresh_start_time = time.time()  # Reset the timer
+            token_refresh_start_time = maybe_refresh_token(token_refresh_start_time)
             
             try:
                 recording_uuid = recording["uuid"]
@@ -551,6 +556,9 @@ def main():
             download_error_ct = 0
             for file_type, file_extension, download_url, recording_type, recording_id, recording_start, alldetails in downloads:
                 file_counter += 1
+
+                token_refresh_start_time = maybe_refresh_token(token_refresh_start_time)
+                
                 try:
                     filename, folder_name, metadata_filename, is_interpretation = format_filename(file_extension, recording, recording_id, 
                                                                                                   recording_type, recording_start, alldetails, interpretation_counter)
