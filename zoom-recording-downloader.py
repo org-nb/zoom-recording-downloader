@@ -11,6 +11,7 @@
 # Created:      2020-04-26
 
 # System modules
+import argparse
 import base64
 import json
 import os
@@ -18,6 +19,7 @@ import re as regex
 import signal
 import sys as system
 import time
+import traceback
 from datetime import datetime, date, timezone, timedelta
 
 # Installed modules
@@ -40,7 +42,21 @@ class Color:
     UNDERLINE = "\033[4m"
     END = "\033[0m"
 
-CONF_PATH = "zoom-recording-downloader.conf"
+DEFAULT_CONF_PATH = "zoom-recording-downloader.conf"
+CONF_PATH = DEFAULT_CONF_PATH
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Zoom Recording Downloader")
+    parser.add_argument(
+        "-c",
+        "--config",
+        default=DEFAULT_CONF_PATH,
+        help="Path to configuration file (default: zoom-recording-downloader.conf)"
+    )
+    return parser.parse_args()
+
+args = parse_args()
+CONF_PATH = args.config
 
 # Load configuration file and check for proper JSON syntax
 try:
@@ -70,7 +86,7 @@ ACCOUNT_ID = config("OAuth", "account_id", LookupError)
 CLIENT_ID = config("OAuth", "client_id", LookupError)
 CLIENT_SECRET = config("OAuth", "client_secret", LookupError)
 
-APP_VERSION = "3.2 (Google Drive Edition)"
+APP_VERSION = "3.3-NB (Google Drive Edition)"
 
 API_ENDPOINT_USER_LIST = "https://api.zoom.us/v2/users"
 
@@ -90,6 +106,7 @@ MEETING_TIMEZONE = ZoneInfo(config("Recordings", "timezone", 'UTC'))
 MEETING_STRFTIME = config("Recordings", "strftime", '%Y.%m.%d - %I.%M %p UTC')
 MEETING_FILENAME = config("Recordings", "filename", '{meeting_time} - {topic} - {rec_type} - {recording_id}.{file_extension}')
 MEETING_FOLDER = config("Recordings", "folder", '{topic} - {meeting_time}')
+SKIP_GALLERY_VIEW_VIDEOS = config("Recordings", "skip_gallery_view_videos", False)
 
 # Google Drive configuration
 GDRIVE_ENABLED = False
@@ -122,7 +139,12 @@ def setup_google_drive():
             
         return drive_client
     except Exception as e:
-        print(f"{Color.RED}### Google Drive initialization failed: {str(e)}{Color.END}")
+        tb = traceback.extract_tb(system.exc_info()[2])
+        print(
+            f"{Color.RED}### Google Drive initialization failed:{Color.END}"
+            f"  {e}\n"
+            f"  {Color.RED}@ line number: {tb[-1].lineno}{Color.END}"
+        )
         choice = input("Would you like to continue with local storage instead? (y/n): ")
         if choice.lower() != 'y':
             system.exit(1)
@@ -196,15 +218,40 @@ def get_users():
     return all_users
 
 
-def format_filename(params):
-    file_extension = params["file_extension"].lower()
-    recording = params["recording"]
-    recording_id = params["recording_id"]
-    recording_type = params["recording_type"]
+def format_filename(file_extension, recording, recording_id, recording_type, recording_start, alldetails, interpretation_counter):
+    file_extension = file_extension.lower()
 
     invalid_chars_pattern = r'[<>:"/\\|?*\x00-\x1F]'
     topic = regex.sub(invalid_chars_pattern, '', recording["topic"])
-    rec_type = recording_type.replace("_", " ").title()
+    rec_type = recording_type.replace("_", " ").title().replace(" ", "").replace("(Cc)", "(CC)")
+    is_interpretation = False
+    if recording_type == "audio_interpretation":
+        is_interpretation = True
+        zoom_fn = alldetails["file_name"]
+        # extract the language code from the filename
+        # example "file_name": "Audio only - Interpretation (简体中文)"
+        lang_match = regex.search(r'Interpretation \((.*?)\)', zoom_fn)
+        if lang_match:
+            lang_code = lang_match.group(1)
+            # change known values to standard 2-letter language codes
+            lang_map = {
+                "简体中文": "zh-CN",
+                "繁體中文": "zh-TW",
+                "Español": "es",
+                "Français": "fr",
+                "Deutsch": "de",
+                "日本語": "ja",
+                "한국어": "ko",
+                "Português": "pt",
+                "Русский": "ru"
+            }
+            # case-insensitive lookup of language code in lang_map
+            if lang_code in lang_map:
+                lang_code = lang_map[lang_code]
+            rec_type += f"-{lang_code}"
+        else:
+            # fallback if no language code is recognized
+            rec_type += f"-{interpretation_counter + 1}"
     meeting_time_utc = parser.parse(recording["start_time"]).replace(tzinfo=timezone.utc)
     meeting_time_local = meeting_time_utc.astimezone(MEETING_TIMEZONE)
     year = meeting_time_local.strftime("%Y")
@@ -214,7 +261,8 @@ def format_filename(params):
 
     filename = MEETING_FILENAME.format(**locals())
     folder = MEETING_FOLDER.format(**locals())
-    return (filename, folder)
+    metadata_filename = f"meta-{meeting_time}-{topic}.json"
+    return (filename, folder, metadata_filename, is_interpretation)
 
 
 def get_downloads(recording):
@@ -234,9 +282,12 @@ def get_downloads(recording):
         else:
             recording_type = download["file_type"]
 
+        # recording_start typical value: "2024-06-23T02:00:29Z"
+        recording_start = download["recording_start"].replace("-", "").replace(":", "")
+
         # must append access token to download_url
         download_url = f"{download['download_url']}?access_token={ACCESS_TOKEN}"
-        downloads.append((file_type, file_extension, download_url, recording_type, recording_id))
+        downloads.append((file_type, file_extension, download_url, recording_type, recording_id, recording_start, download))
 
     return downloads
 
@@ -275,16 +326,31 @@ def list_recordings(user_id, email = None):
         )
 
         if DEBUG_ENABLED:
-            debug_filename = os.sep.join([DEBUG_DUMP_DIR, f"api_user_{email if email else user_id}_recordings_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}.json"])
+            debug_basefn = f"api_user_{email if email else user_id}_recordings_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}"
+            debug_filename = os.sep.join([DEBUG_DUMP_DIR, f"{debug_basefn}.json"])
             with open(debug_filename, 'w', encoding='utf-8') as debug_file:
                 debug_file.write(response.text) 
 
         recordings_data = response.json()
         if "meetings" in recordings_data:
-            recordings.extend(recordings_data["meetings"])
+            # call the /meetings/{meetingId}/recordings endpoint for each meeting so that we also get language interpretation recordings
+            # the /user/{userId}/recordings endpoint does not return interpretation recordings
+            for meeting in recordings_data["meetings"]:
+                meeting_uuid = meeting["uuid"]
+                response2 = requests.get(
+                    url=f"https://api.zoom.us/v2/meetings/{meeting_uuid}/recordings",
+                    headers=AUTHORIZATION_HEADER,
+                    params=post_data
+                )
+                if DEBUG_ENABLED:
+                    sanitized_uuid = path_validate.sanitize_filename(meeting_uuid)
+                    debug_filename2 = os.sep.join([DEBUG_DUMP_DIR, f"{debug_basefn}_ mtg_{sanitized_uuid}.json"])
+                    with open(debug_filename2, 'w', encoding='utf-8') as debug_file2:
+                        debug_file2.write(response2.text)
+                meeting_data = response2.json()
+                recordings.append(meeting_data)
         else:
             print(f"No 'meetings' key found in response for {user_id} from {start} to {end}")
-
     return recordings
 
 
@@ -292,31 +358,49 @@ def download_recording(download_url, email, filename, folder_name):
     dl_dir = os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
     sanitized_download_dir = path_validate.sanitize_filepath(dl_dir)
     sanitized_filename = path_validate.sanitize_filename(filename)
+    tmp_filename = f"{sanitized_filename}.~TMP"
     full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
+    tmpdl_filename = os.sep.join([sanitized_download_dir, tmp_filename])
 
-    os.makedirs(sanitized_download_dir, exist_ok=True)
-
-    response = requests.get(download_url, stream=True)
-
-    # total size in bytes.
-    total_size = int(response.headers.get("content-length", 0))
-    block_size = 32 * 1024  # 32 Kibibytes
-
-    # create TQDM progress bar
-    prog_bar = progress_bar.tqdm(dynamic_ncols=True, total=total_size, unit="iB", unit_scale=True)
     try:
-        with open(full_filename, "wb") as fd:
+        os.makedirs(sanitized_download_dir, exist_ok=True)
+
+        response = requests.get(download_url, stream=True)
+        # total size in bytes.
+        total_size = int(response.headers.get("content-length", 0))
+
+        first_byte = 0
+        if (os.path.exists(tmpdl_filename)):
+            # file exists: resume download
+            first_byte = os.path.getsize(tmpdl_filename)
+            if first_byte < total_size:
+                headers = {"Range": f"bytes={first_byte}-{total_size}"}
+                response = requests.get(download_url, headers=headers, stream=True)
+            else:
+                os.rename(tmpdl_filename, full_filename)
+                return True
+
+        # create TQDM progress bar
+        prog_bar = progress_bar.tqdm(dynamic_ncols=True, total=total_size, unit="iB", unit_scale=True)
+        prog_bar.update(first_byte)
+
+        block_size = 32 * 1024  # 32 Kibibytes
+        with open(tmpdl_filename, "wb") as fd:
             for chunk in response.iter_content(block_size):
                 prog_bar.update(len(chunk))
                 fd.write(chunk)  # write video chunk to disk
-        prog_bar.close()
 
+        prog_bar.close()
+        os.rename(tmpdl_filename, full_filename)    
         return True
 
     except Exception as e:
+        tb = traceback.extract_tb(system.exc_info()[2])
         print(
             f"{Color.RED}### The video recording with filename '{filename}' for user with email "
-            f"'{email}' could not be downloaded because {Color.END}'{e}'"
+            f"'{email}' could not be downloaded because:{Color.END}\n"
+            f"  {e}\n"
+            f"  {Color.RED}@ line number: {tb[-1].lineno}{Color.END}"
         )
 
         return False
@@ -338,7 +422,7 @@ def load_completed_meeting_ids():
 
 
 def handle_graceful_shutdown(signal_received, frame):
-    print(f"\n{Color.DARK_CYAN}SIGINT or CTRL-C detected. system.exiting gracefully.{Color.END}")
+    print(f"\n{Color.DARK_CYAN}SIGINT or CTRL-C detected. System exiting gracefully.{Color.END}")
 
     system.exit(0)
 
@@ -355,8 +439,8 @@ def init_debug():
 def main():
     init_debug()
 
-    # clear the screen buffer
-    os.system('cls' if os.name == 'nt' else 'clear')
+    # # clear the screen buffer
+    # os.system('cls' if os.name == 'nt' else 'clear')
 
     # show the logo
     print(f"""
@@ -426,14 +510,25 @@ def main():
         recordings = list_recordings(user_id, email)
         total_count = len(recordings)
         print(f"==> Found {total_count} recordings")
+        #continue
+
+        # Initialize elapsed time monitor
+        token_refresh_start_time = time.time()
 
         for index, recording in enumerate(recordings):
+            # Check if an hour has elapsed and refresh token if needed
+            elapsed_time = time.time() - token_refresh_start_time
+            if elapsed_time >= 3600:  # 3600 seconds = 1 hour
+                # refresh the access token so it does not expire for long running downloads
+                load_access_token()
+                token_refresh_start_time = time.time()  # Reset the timer
+            
             try:
                 recording_uuid = recording["uuid"]
 
                 if recording_uuid in COMPLETED_MEETING_IDS:
                     print(
-                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count}"
+                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count} ('{recording['topic']}' @ {recording['start_time']})"
                     )
                     continue
 
@@ -442,54 +537,88 @@ def main():
             except Exception as e:
                 print(
                     f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
-                    f"of {total_count} due to error: {str(e)}{Color.END}"
+                    f"of {total_count} due to error:{Color.END}\n"
+                    f"  {str(e)}"
+                    f"  {Color.RED}@ line number: {tb[-1].lineno}{Color.END}"
                 )
                 continue
 
             print(f"\n==> Processing recording {index + 1} of {total_count}")
 
-            for file_type, file_extension, download_url, recording_type, recording_id in downloads:
+            file_counter = 0
+            interpretation_counter = 0
+            download_count = len(downloads)
+            download_error_ct = 0
+            for file_type, file_extension, download_url, recording_type, recording_id, recording_start, alldetails in downloads:
+                file_counter += 1
                 try:
-                    params = {
-                        "file_extension": file_extension,
-                        "recording": recording,
-                        "recording_id": recording_id,
-                        "recording_type": recording_type
-                    }
-                    filename, folder_name = format_filename(params)
+                    filename, folder_name, metadata_filename, is_interpretation = format_filename(file_extension, recording, recording_id, 
+                                                                                                  recording_type, recording_start, alldetails, interpretation_counter)
+                    if is_interpretation:
+                        interpretation_counter += 1
+                    
+                    # Skip gallery view video files if configured to do so
+                    if SKIP_GALLERY_VIEW_VIDEOS and "gallery_view" in recording_type:
+                        print(f"    > Skipping gallery view video file: {filename}")
+                        continue
 
-                    print(f"    > Downloading {filename}")
+                    print(f"    > Downloading {file_counter} of {download_count}: {filename}")
                     sanitized_download_dir = path_validate.sanitize_filepath(
                         os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
                     )
                     sanitized_filename = path_validate.sanitize_filename(filename)
                     full_filename = os.sep.join([sanitized_download_dir, sanitized_filename])
 
+                    # write the recording variable as JSON metadata to a file in the download folder
+                    if file_counter == 1:
+                        os.makedirs(sanitized_download_dir, exist_ok=True)
+                        metadata_filename = os.sep.join([
+                            sanitized_download_dir, 
+                            metadata_filename
+                        ])
+                        with open(metadata_filename, "w", encoding="utf-8") as metadata_file:
+                            json.dump(recording, metadata_file, indent=4)
+
                     if SKIP_EXISTING_FILES and os.path.exists(full_filename):
-                        print(f"    > File already exists: {full_filename}")
+                        print(f"        Skip: File already exists: {full_filename}")
                         continue
                     
                     if download_recording(download_url, email, filename, folder_name):
                         if GDRIVE_ENABLED and drive_service:
-                            print(f"    > Uploading to Google Drive...")
+                            print(f"        > Uploading to Google Drive...")
                             success = drive_service.upload_file(full_filename, folder_name, sanitized_filename)
                             if success and os.path.exists(full_filename):
                                 os.remove(full_filename)
                                 if not os.listdir(sanitized_download_dir):
                                     os.rmdir(sanitized_download_dir)
+                    else:
+                        print(
+                            f"{Color.RED}### Download failed for {file_counter} of {download_count}: {filename}"
+                        )
+                        download_error_ct += 1
+                        continue
 
                 except Exception as e:
+                    tb = traceback.extract_tb(system.exc_info()[2])
                     print(
                         f"{Color.RED}### Failed to process file {file_type} "
-                        f"for recording {index + 1} of {total_count} due to error: "
-                        f"{str(e)}{Color.END}"
+                        f"for recording {index + 1} of {total_count} due to error:{Color.END}\n"
+                        f"    {str(e)}\n"
+                        f"  {Color.RED}@ line number: {tb[-1].lineno}{Color.END}"
                     )
+                    download_error_ct += 1
                     continue
 
-            with open(COMPLETED_MEETING_IDS_LOGFILEPATH, "a", encoding="utf-8") as fd:
-                # Write the completed recording UUID to the log file with additional human-friendly info
-                fd.write(f"{recording_uuid} Start:{recording['start_time']} TZ:{recording['timezone']} Topic:'{recording['topic']}'\n")
-                COMPLETED_MEETING_IDS.add(recording_uuid)
+            if download_error_ct == 0:
+                with open(COMPLETED_MEETING_IDS_LOGFILEPATH, "a", encoding="utf-8") as fd:
+                    # Write the completed recording UUID to the log file with additional human-friendly info
+                    fd.write(f"{recording_uuid} Start:{recording['start_time']} TZ:{recording['timezone']} Topic:'{recording['topic']}' # Files:{recording['recording_count']} Size: {recording['total_size']}\n")
+                    COMPLETED_MEETING_IDS.add(recording_uuid)
+            else:
+                print(
+                    f"{Color.RED}### INCOMPLETE: Recording {index + 1} of {total_count} had "
+                    f"{download_error_ct} download errors.{Color.END}"
+                )
 
 
 if __name__ == "__main__":
