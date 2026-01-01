@@ -540,6 +540,7 @@ def main():
                 downloads = get_downloads(recording)
 
             except Exception as e:
+                tb = traceback.extract_tb(system.exc_info()[2])
                 print(
                     f"{Color.RED}### Failed to get download URLs for recording {index + 1} "
                     f"of {total_count} due to error:{Color.END}\n"
