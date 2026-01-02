@@ -95,6 +95,10 @@ RECORDING_START_MONTH = config("Recordings", "start_month", 1)
 RECORDING_START_DAY = config("Recordings", "start_day", 1)
 RECORDING_START_DATE = parser.parse(config("Recordings", "start_date", f"{RECORDING_START_YEAR}-{RECORDING_START_MONTH}-{RECORDING_START_DAY}")).replace(tzinfo=timezone.utc)
 RECORDING_END_DATE = parser.parse(config("Recordings", "end_date", str(date.today()))).replace(tzinfo=timezone.utc)
+
+# Optional list of user emails to download recordings for; empty list means all users
+RECORDING_USERS : list[str] = config("Recordings", "users", [])
+
 DOWNLOAD_DIRECTORY = config("Storage", "download_dir", 'downloads')
 AUTO_STORAGE_CHOICE = config("Storage", "storage_type", '')
 COMPLETED_MEETING_IDS_LOG = config("Storage", "completed_log", 'completed-downloads.log')
@@ -326,6 +330,8 @@ def list_recordings(user_id, email = None):
     """
     
     recordings = []
+    # declare a dictionary to hold user recording objects whose total size or record count does not match the meetings API values
+    recordings_discrepancies = {}
 
     for start, end in per_delta(RECORDING_START_DATE, RECORDING_END_DATE, timedelta(days=30)):
         post_data = get_recordings(user_id, 300, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
@@ -347,6 +353,8 @@ def list_recordings(user_id, email = None):
             # the /user/{userId}/recordings endpoint does not return interpretation recordings
             for meeting in recordings_data["meetings"]:
                 meeting_uuid = meeting["uuid"]
+                user_api_total_size = meeting.get("total_size", 0)
+                user_api_recording_count = meeting.get("recording_count", 0)
                 response2 = requests.get(
                     url=f"https://api.zoom.us/v2/meetings/{meeting_uuid}/recordings",
                     headers=AUTHORIZATION_HEADER,
@@ -358,10 +366,25 @@ def list_recordings(user_id, email = None):
                     with open(debug_filename2, 'w', encoding='utf-8') as debug_file2:
                         debug_file2.write(response2.text)
                 meeting_data = response2.json()
-                recordings.append(meeting_data)
+                # check for discrepancies in total_size or recording_count
+                meeting_api_total_size = meeting_data.get("total_size", 0)
+                meeting_api_recording_count = meeting_data.get("recording_count", 0)
+                if (meeting_api_total_size != user_api_total_size or
+                        meeting_api_recording_count != user_api_recording_count):
+                    recordings_discrepancies[meeting_uuid] = {
+                        "user_api_total_size": user_api_total_size,
+                        "meeting_api_total_size": meeting_api_total_size,
+                        "user_api_recording_count": user_api_recording_count,
+                        "meeting_api_recording_count": meeting_api_recording_count,
+                        "meeting_u": meeting,
+                        "meeting_m": meeting_data
+                    }
+                    recordings.append(meeting_data if meeting_api_total_size > user_api_total_size else meeting)
+                else:
+                    recordings.append(meeting_data)
         else:
             print(f"No 'meetings' key found in response for {user_id} from {start} to {end}")
-    return recordings
+    return (recordings, recordings_discrepancies)
 
 
 def download_recording(download_url, email, filename, folder_name):
@@ -510,6 +533,30 @@ def main():
 
     print(f"{Color.BOLD}Getting user accounts...{Color.END}")
     users = get_users()
+    # check of RECORDING_USERS is not empty
+    # if so, verify each email exists in users list
+    if RECORDING_USERS:
+        user_error_ct = 0
+        filtered_users = []
+        user_emails = [user[0] for user in users]
+        for email in RECORDING_USERS:
+            if email in user_emails:
+                for user in users:
+                    if user[0] == email:
+                        filtered_users.append(user)
+                        break
+            else:
+                print(f"{Color.RED}### User email '{email}' not found in Zoom account users.{Color.END}")
+                user_error_ct += 1
+        if user_error_ct > 0:
+            print(f"{Color.RED}### Exiting due to {user_error_ct} invalid user email(s).{Color.END}")
+            # print the list of valid user emails
+            print("Valid user emails for this account are:")
+            for user in users:
+                print(f" - {user[0]}")
+            system.exit(1)
+        users = filtered_users
+        print(f"{Color.BOLD}Filtered to {len(users)} user(s) out of {len(user_emails)} account user(s) based on configuration.{Color.END}")
 
     for email, user_id, first_name, last_name in users:
         userInfo = (
@@ -517,7 +564,7 @@ def main():
         )
         print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
 
-        recordings = list_recordings(user_id, email)
+        (recordings, recordings_discrepancies) = list_recordings(user_id, email)
         total_count = len(recordings)
         print(f"==> Found {total_count} recordings")
         #continue
