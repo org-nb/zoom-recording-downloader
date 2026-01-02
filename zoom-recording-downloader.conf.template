@@ -27,10 +27,14 @@
         "start_day": "1",
         "start_date": "2024-01-01",
         "end_date": "2024-12-31",
+        "_comment_users": "Add user emails here, or leave empty to process all users in the account",
+        "users": [],
         "timezone": "America/New_York",
         "strftime": "%Y.%m.%d-%H.%M%z",
         "filename": "{meeting_time}-{topic}-{rec_type}-{recording_id}.{file_extension}",
-        "folder": "{year}-{month}/{meeting_time}-{topic}"
+        "folder": "{year}-{month}/{meeting_time}-{topic}",
+        "_comment_skip_gallery_view_videos": "Set to true to skip downloading gallery view videos",
+        "skip_gallery_view_videos": false
     },
     "Debug": {
         "enabled": false,
