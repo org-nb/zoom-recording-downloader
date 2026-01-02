@@ -30,6 +30,8 @@ import pathvalidate as path_validate
 import requests
 import tqdm as progress_bar
 from zoneinfo import ZoneInfo
+
+import urllib.parse
 from google_drive_client import GoogleDriveClient
 
 class Color:
@@ -314,8 +316,7 @@ def get_downloads(recording: Dict[str, Any]) -> List[Tuple[str, str, str, str, s
         # recording_start typical value: "2024-06-23T02:00:29Z"
         recording_start = download["recording_start"].replace("-", "").replace(":", "")
 
-        # must append access token to download_url
-        download_url = f"{download['download_url']}?access_token={ACCESS_TOKEN}"
+        download_url = download['download_url']
         downloads.append((file_type, file_extension, download_url, recording_type, recording_id, recording_start, download))
 
     return downloads
@@ -339,14 +340,12 @@ def per_delta(start: datetime, end: datetime, delta: timedelta) -> Iterator[Tupl
         curr += delta
 
 
-def list_recordings(user_id: str, email: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+def list_recordings(user_id: str, email: Optional[str] = None) -> List[Dict[str, Any]]:
     """ Start date now split into YEAR, MONTH, and DAY variables (Within 6 month range)
         then get recordings within that range
     """
     
     recordings = []
-    # declare a dictionary to hold user recording objects whose total size or record count does not match the meetings API values
-    recordings_discrepancies = {}
 
     for start, end in per_delta(RECORDING_START_DATE, RECORDING_END_DATE, timedelta(days=30)):
         post_data = get_recordings(user_id, 300, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
@@ -364,14 +363,20 @@ def list_recordings(user_id: str, email: Optional[str] = None) -> Tuple[List[Dic
 
         recordings_data = response.json()
         if "meetings" in recordings_data:
-            # call the /meetings/{meetingId}/recordings endpoint for each meeting so that we also get language interpretation recordings
-            # the /user/{userId}/recordings endpoint does not return interpretation recordings
+            # Call the /meetings/{meetingId}/recordings endpoint for each meeting so that we also get language interpretation recordings
+            # The /user/{userId}/recordings endpoint does not return interpretation recordings
             for meeting in recordings_data["meetings"]:
-                meeting_uuid = meeting["uuid"]
+                meeting_uuid: str = meeting["uuid"]
                 user_api_total_size = meeting.get("total_size", 0)
                 user_api_recording_count = meeting.get("recording_count", 0)
+                # If the meeting UUID starts with '/' or contains '//', the '/' character(s) must be DOUBLE-encoded(!).
+                # See https://developers.zoom.us/blog/meeting-api-querying-tips-part1/
+                # However, if the UUID contains a single '/', it must NOT be encoded at all.
+                url_safe_uuid = meeting_uuid
+                if meeting_uuid.startswith("/") or meeting_uuid.find("//") > 0:
+                    url_safe_uuid = urllib.parse.quote(urllib.parse.quote(meeting_uuid, safe=''))
                 response2 = requests.get(
-                    url=f"https://api.zoom.us/v2/meetings/{meeting_uuid}/recordings",
+                    url=f"https://api.zoom.us/v2/meetings/{url_safe_uuid}/recordings",
                     headers=AUTHORIZATION_HEADER,
                     params=post_data
                 )
@@ -386,20 +391,20 @@ def list_recordings(user_id: str, email: Optional[str] = None) -> Tuple[List[Dic
                 meeting_api_recording_count = meeting_data.get("recording_count", 0)
                 if (meeting_api_total_size != user_api_total_size or
                         meeting_api_recording_count != user_api_recording_count):
-                    recordings_discrepancies[meeting_uuid] = {
-                        "user_api_total_size": user_api_total_size,
-                        "meeting_api_total_size": meeting_api_total_size,
-                        "user_api_recording_count": user_api_recording_count,
-                        "meeting_api_recording_count": meeting_api_recording_count,
-                        "meeting_u": meeting,
-                        "meeting_m": meeting_data
-                    }
+                    # Since the /meetings/ endpoint includes language interpretation recordings but the /users/ endpoint does not, it is normal for the meeting_api_recording_count to be higher.
+                    # print(f"{Color.YELLOW}### Discrepancy found for meeting #{len(recordings) + 1} UUID {meeting_uuid} ('{meeting.get('topic', '(missing topic)')}', start time: {meeting.get('start_time', '(missing start time)')}):\n"
+                    #       f"  user total size = {user_api_total_size}; meeting total size = {meeting_api_total_size}\n"
+                    #       f"  user recording count = {user_api_recording_count}; meeting recording count = {meeting_api_recording_count}{Color.END}")
+                    if meeting_api_recording_count == 0:
+                        print(f"{Color.RED}### Warning: /meetings/ endpoint returned NO meeting info for UUID {meeting_uuid} ('{meeting.get('topic', '(missing topic)')}', start time: {meeting.get('start_time', '(missing start time)')}).{Color.END}")
+                        print(f"{Color.RED}  Code: {meeting_data.get('code', '(no code)')}; Message: {meeting_data.get('message', '(no message)')}{Color.END}")
+                    # prefer meeting_data if it has more recordings
                     recordings.append(meeting_data if meeting_api_total_size > user_api_total_size else meeting)
                 else:
                     recordings.append(meeting_data)
         else:
             print(f"No 'meetings' key found in response for {user_id} from {start} to {end}")
-    return (recordings, recordings_discrepancies)
+    return recordings
 
 
 def download_recording(download_url: str, email: str, filename: str, folder_name: str) -> bool:
@@ -579,10 +584,9 @@ def main() -> None:
         )
         print(f"\n{Color.BOLD}Getting recording list for {userInfo}{Color.END}")
 
-        (recordings, recordings_discrepancies) = list_recordings(user_id, email)
+        recordings = list_recordings(user_id, email)
         total_count = len(recordings)
         print(f"==> Found {total_count} recordings")
-        #continue
 
         # Initialize elapsed time monitor
         token_refresh_start_time = time.time()
@@ -595,7 +599,7 @@ def main() -> None:
 
                 if recording_uuid in COMPLETED_MEETING_IDS:
                     print(
-                        f"\n==> Skipping already downloaded recording {index + 1} of {total_count} ('{recording['topic']}' @ {recording['start_time']})"
+                        f"==> Skipping already downloaded recording {index + 1} of {total_count}: '{recording['topic']}' @ {recording['start_time']}"
                     )
                     continue
 
@@ -654,6 +658,8 @@ def main() -> None:
                         print(f"        Skip: File already exists: {full_filename}")
                         continue
                     
+                    # append current access token to download_url
+                    download_url += f"?access_token={ACCESS_TOKEN}"
                     if download_recording(download_url, email, filename, folder_name):
                         if GDRIVE_ENABLED and drive_service:
                             print(f"        > Uploading to Google Drive...")
@@ -672,7 +678,7 @@ def main() -> None:
                 except Exception as e:
                     tb = traceback.extract_tb(system.exc_info()[2])
                     print(
-                        f"{Color.RED}### Failed to process file {file_type} "
+                        f"{Color.RED}### Failed to process file {file_type} ({recording_type}, ID {recording_id})"
                         f"for recording {index + 1} of {total_count} due to error:{Color.END}\n"
                         f"    {str(e)}\n"
                         f"  {Color.RED}@ line number: {tb[-1].lineno}{Color.END}"
