@@ -1,0 +1,20 @@
+{
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules"
+  ],
+  "typeCheckingMode": "standard",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "overrides": [
+    {
+      "include": ["**/builtins.pyi"],
+      "typeCheckingMode": "basic"
+    }
+  ]
+}

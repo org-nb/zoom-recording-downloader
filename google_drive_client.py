@@ -1,7 +1,9 @@
 import os
 import json
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 from google.oauth2.credentials import Credentials
+from google.auth.credentials import Credentials as BaseCredentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -40,13 +42,13 @@ class GoogleDriveClient:
         'https://www.googleapis.com/auth/drive.appdata'
     ]
 
-    def __init__(self, config):
-        self.config = config
-        self.service = None
-        self.credentials = None
-        self.root_folder_id = None
+    def __init__(self, config: Dict[str, Any]):
+        self.config: Dict[str, Any] = config
+        self.service: Any = None  # Resource type lacks stubs for about() and files()
+        self.credentials: Optional[Union[Credentials, BaseCredentials]] = None
+        self.root_folder_id: Optional[str] = None
 
-    def authenticate(self):
+    def authenticate(self) -> bool:
         """Handle the OAuth flow and return True if successful."""
         print(f"{Color.DARK_CYAN}Initializing Google Drive authentication...{Color.END}")
         
@@ -91,6 +93,7 @@ class GoogleDriveClient:
             self.credentials = creds
             
             # Get user email
+            assert self.service is not None
             user_info = self.service.about().get(fields="user").execute()
             email = user_info['user']['emailAddress']
             print(f"{Color.GREEN}Successfully authenticated as {email}{Color.END}")
@@ -100,13 +103,14 @@ class GoogleDriveClient:
             print(f"{Color.RED}Failed to initialize Drive service: {e}{Color.END}")
             return False
 
-    def _handle_upload_with_refresh(self, request):
+    def _handle_upload_with_refresh(self, request: Any) -> Any:  # ambiguous type
         """Execute request with token refresh handling."""
         try:
             return request.execute()
         except HttpError as e:
             if e.resp.status in [401, 403]:
-                if self.credentials.refresh_token:
+                assert self.credentials is not None
+                if hasattr(self.credentials, 'refresh_token') and self.credentials.refresh_token:  # type: ignore[attr-defined]
                     print(f"{Color.YELLOW}Token expired, refreshing...{Color.END}")
                     self.credentials.refresh(Request())
                     return self._handle_upload_with_refresh(request)
@@ -116,9 +120,9 @@ class GoogleDriveClient:
                         return self._handle_upload_with_refresh(request)
             raise
 
-    def create_folder(self, folder_name, parent_id=None):
+    def create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
         """Create a folder in Google Drive and return its ID."""
-        file_metadata = {
+        file_metadata: Dict[str, Union[str, List[str]]] = {
             'name': folder_name,
             'mimeType': 'application/vnd.google-apps.folder'
         }
@@ -126,6 +130,7 @@ class GoogleDriveClient:
             file_metadata['parents'] = [parent_id]
         
         try:
+            assert self.service is not None
             folder = self._handle_upload_with_refresh(
                 self.service.files().create(body=file_metadata, fields='id')
             )
@@ -134,7 +139,7 @@ class GoogleDriveClient:
             print(f"{Color.RED}Failed to create folder {folder_name}: {str(e)}{Color.END}")
             return None
 
-    def get_or_create_folder_path(self, folder_path, parent_id=None):
+    def get_or_create_folder_path(self, folder_path: str, parent_id: Optional[str] = None) -> Optional[str]:
         """Navigate or create folder structure in Google Drive."""
         current_parent = parent_id
         for folder in folder_path.split(os.sep):
@@ -146,6 +151,7 @@ class GoogleDriveClient:
                 query += f" and '{current_parent}' in parents"
             
             try:
+                assert self.service is not None
                 results = self._handle_upload_with_refresh(
                     self.service.files().list(
                         q=query,
@@ -166,14 +172,14 @@ class GoogleDriveClient:
         
         return current_parent
 
-    def upload_file(self, local_path, folder_name, filename):
+    def upload_file(self, local_path: str, folder_name: str, filename: str) -> bool:
         """Upload file to Google Drive with retry logic."""
         try:
             folder_id = self.get_or_create_folder_path(folder_name, self.root_folder_id)
             if not folder_id:
                 return False
 
-            file_metadata = {
+            file_metadata: Dict[str, Union[str, List[str]]] = {
                 'name': filename,
                 'parents': [folder_id]
             }
@@ -190,6 +196,7 @@ class GoogleDriveClient:
             for attempt in range(max_retries):
                 try:
                     print(f"    Attempt {attempt + 1} of {max_retries}...")
+                    assert self.service is not None
                     request = self.service.files().create(
                         body=file_metadata,
                         media_body=media,
@@ -208,11 +215,12 @@ class GoogleDriveClient:
                         with open(failed_log, 'a') as log:
                             log.write(f"{datetime.now()}: Failed to upload {filename} - {str(e)}\n")
                         return False
+            return False  # Should never reach here, but satisfies type checker
         except Exception as e:
             print(f"{Color.RED}Upload preparation failed: {str(e)}{Color.END}")
             return False
 
-    def initialize_root_folder(self):
+    def initialize_root_folder(self) -> bool:
         """Create root folder with timestamp."""
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         root_folder_name = f"{self.config.get('root_folder_name', 'zoom-recording-downloader')}-{timestamp}"

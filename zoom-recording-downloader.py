@@ -21,6 +21,8 @@ import sys as system
 import time
 import traceback
 from datetime import datetime, date, timezone, timedelta
+from types import FrameType
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 # Installed modules
 import dateutil.parser as parser
@@ -44,8 +46,11 @@ class Color:
 
 DEFAULT_CONF_PATH = "zoom-recording-downloader.conf"
 CONF_PATH = DEFAULT_CONF_PATH
+CONF: Dict[str, Any] = {}
+ACCESS_TOKEN: Optional[str] = None
+AUTHORIZATION_HEADER: Dict[str, str] = {}
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Zoom Recording Downloader")
     parser.add_argument(
         "-c",
@@ -72,7 +77,7 @@ except Exception as e:
     print(f"{Color.RED}### Unexpected error: {e}")
     system.exit(1)
 
-def config(section, key, default=''):
+def config(section: str, key: str, default: Any = '') -> Any:
     try:
         return CONF[section][key]
     except KeyError:
@@ -124,7 +129,9 @@ GDRIVE_FAILED_LOG = config("GoogleDrive", "failed_log", "failed-uploads.log")
 DEBUG_ENABLED = config("Debug", "enabled", False)
 DEBUG_DUMP_DIR = config("Debug", "dump_dir", 'debugdumps')
 
-def setup_google_drive():
+
+
+def setup_google_drive() -> Optional[GoogleDriveClient]:
     """Initialize Google Drive client with OAuth authentication"""
     try:
         drive_client = GoogleDriveClient(CONF.get('GoogleDrive', {}))
@@ -157,7 +164,7 @@ def setup_google_drive():
 
 
 
-def load_access_token():
+def load_access_token() -> None:
     """ OAuth function, thanks to https://github.com/freelimiter
     """
     url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={ACCOUNT_ID}"
@@ -186,7 +193,7 @@ def load_access_token():
         print(f"{Color.RED}### The key 'access_token' wasn't found.{Color.END}")
 
 
-def maybe_refresh_token(token_refresh_start_time):
+def maybe_refresh_token(token_refresh_start_time: float) -> float:
     # Check if an hour has elapsed and refresh token if needed
     elapsed_time = time.time() - token_refresh_start_time
     if elapsed_time >= 3600:  # 3600 seconds = 1 hour
@@ -196,7 +203,7 @@ def maybe_refresh_token(token_refresh_start_time):
     return token_refresh_start_time
 
 
-def get_users():
+def get_users() -> List[Tuple[str, str, str, str]]:
     """ loop through pages and return all users """
     response = requests.get(url=API_ENDPOINT_USER_LIST, headers=AUTHORIZATION_HEADER)
 
@@ -232,7 +239,15 @@ def get_users():
     return all_users
 
 
-def format_filename(file_extension, recording, recording_id, recording_type, recording_start, alldetails, interpretation_counter):
+def format_filename(
+    file_extension: str,
+    recording: Dict[str, Any],
+    recording_id: str,
+    recording_type: str,
+    recording_start: str,
+    alldetails: Dict[str, Any],
+    interpretation_counter: int
+) -> Tuple[str, str, str, bool]:
     file_extension = file_extension.lower()
 
     invalid_chars_pattern = r'[<>:"/\\|?*\x00-\x1F]'
@@ -279,7 +294,7 @@ def format_filename(file_extension, recording, recording_id, recording_type, rec
     return (filename, folder, metadata_filename, is_interpretation)
 
 
-def get_downloads(recording):
+def get_downloads(recording: Dict[str, Any]) -> List[Tuple[str, str, str, str, str, str, Dict[str, Any]]]:
     if not recording.get("recording_files"):
         raise Exception
 
@@ -306,7 +321,7 @@ def get_downloads(recording):
     return downloads
 
 
-def get_recordings(email, page_size, rec_start_date, rec_end_date):
+def get_recordings(email: str, page_size: int, rec_start_date: str, rec_end_date: str) -> Dict[str, Any]:
     return {
         "userId": email,
         "page_size": page_size,
@@ -315,7 +330,7 @@ def get_recordings(email, page_size, rec_start_date, rec_end_date):
     }
 
 
-def per_delta(start, end, delta):
+def per_delta(start: datetime, end: datetime, delta: timedelta) -> Iterator[Tuple[datetime, datetime]]:
     """ Generator used to create deltas for recording start and end dates
     """
     curr = start
@@ -324,7 +339,7 @@ def per_delta(start, end, delta):
         curr += delta
 
 
-def list_recordings(user_id, email = None):
+def list_recordings(user_id: str, email: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """ Start date now split into YEAR, MONTH, and DAY variables (Within 6 month range)
         then get recordings within that range
     """
@@ -362,7 +377,7 @@ def list_recordings(user_id, email = None):
                 )
                 if DEBUG_ENABLED:
                     sanitized_uuid = path_validate.sanitize_filename(meeting_uuid)
-                    debug_filename2 = os.sep.join([DEBUG_DUMP_DIR, f"{debug_basefn}_ mtg_{sanitized_uuid}.json"])
+                    debug_filename2 = os.sep.join([DEBUG_DUMP_DIR, f"{debug_basefn}_ mtg_{sanitized_uuid}.json"]) # pyright: ignore[reportPossiblyUnboundVariable]
                     with open(debug_filename2, 'w', encoding='utf-8') as debug_file2:
                         debug_file2.write(response2.text)
                 meeting_data = response2.json()
@@ -387,7 +402,7 @@ def list_recordings(user_id, email = None):
     return (recordings, recordings_discrepancies)
 
 
-def download_recording(download_url, email, filename, folder_name):
+def download_recording(download_url: str, email: str, filename: str, folder_name: str) -> bool:
     dl_dir = os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
     sanitized_download_dir = path_validate.sanitize_filepath(dl_dir)
     sanitized_filename = path_validate.sanitize_filename(filename)
@@ -439,7 +454,7 @@ def download_recording(download_url, email, filename, folder_name):
         return False
 
 
-def load_completed_meeting_ids():
+def load_completed_meeting_ids() -> None:
     try:
         with open(COMPLETED_MEETING_IDS_LOGFILEPATH, 'r', encoding="utf-8") as fd:
             for line in fd:
@@ -454,12 +469,12 @@ def load_completed_meeting_ids():
         )
 
 
-def handle_graceful_shutdown(signal_received, frame):
+def handle_graceful_shutdown(signal_received: int, frame: Optional[FrameType]) -> None:
     print(f"\n{Color.DARK_CYAN}SIGINT or CTRL-C detected. System exiting gracefully.{Color.END}")
 
     system.exit(0)
 
-def init_debug():
+def init_debug() -> None:
     if not DEBUG_ENABLED:
         return
 
@@ -469,7 +484,7 @@ def init_debug():
 # #                        MAIN                                  #
 # ################################################################
 
-def main():
+def main() -> None:
     init_debug()
 
     # # clear the screen buffer
